@@ -2,3 +2,7 @@ fastapi
 uvicorn[standard]
 groq
 pydantic-settings
+pyjwt
+pwdlib[argon2]
+python-multipart
+

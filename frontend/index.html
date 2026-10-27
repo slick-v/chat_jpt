@@ -5,63 +5,232 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>chat_jpt</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; max-width: 1000px; margin: 0 auto; padding: 16px; }
+    header { display: flex; justify-content: space-between; align-items: center; }
+    .hidden { display: none !important; }
+    input { padding: 10px; font-size: 16px; }
+    button { padding: 8px 14px; cursor: pointer; }
+
+    #auth-form { max-width: 320px; display: flex; flex-direction: column; gap: 8px; }
+    .row { display: flex; gap: 8px; }
+    .error-text { color: #b91c1c; min-height: 1.2em; }
+
+    #chat-view { display: grid; grid-template-columns: 220px 1fr; gap: 16px; }
+    #new-chat { width: 100%; }
+    #conversations { list-style: none; padding: 0; margin: 12px 0 0; }
+    #conversations li { display: flex; border-radius: 6px; }
+    #conversations li.active { background: #e2e8f0; }
+    #conversations .title { flex: 1; min-width: 0; text-align: left; background: none; border: none;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #conversations .delete { background: none; border: none; color: #94a3b8; }
+
     #log { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; }
     .msg { padding: 10px 14px; border-radius: 10px; white-space: pre-wrap; max-width: 85%; }
     .user { background: #dbeafe; align-self: flex-end; }
     .assistant { background: #f1f5f9; align-self: flex-start; }
     .error { background: #fee2e2; align-self: flex-start; }
-    form { display: flex; gap: 8px; }
-    input { flex: 1; padding: 10px; font-size: 16px; }
-    button { padding: 10px 16px; }
+    #chat-form { display: flex; gap: 8px; }
+    #chat-form input { flex: 1; }
     #stats { color: #64748b; font-size: 12px; margin-top: 8px; }
+
+    @media (max-width: 640px) { #chat-view { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
-  <h1>chat_jpt</h1>
-  <div id="log"></div>
-  <form id="form">
-    <input id="input" placeholder="Say something..." autocomplete="off" required>
-    <button id="send">Send</button>
-  </form>
-  <div id="stats"></div>
+  <header>
+    <h1>chat_jpt</h1>
+    <div id="userbar" class="hidden">
+      <span id="who"></span>
+      <button id="logout">Log out</button>
+    </div>
+  </header>
+
+  <section id="auth-view" class="hidden">
+    <form id="auth-form">
+      <input id="username" placeholder="Username" autocomplete="username" required>
+      <input id="password" type="password" placeholder="Password (8+ characters)" autocomplete="current-password" required>
+      <div class="row">
+        <button type="submit" data-action="login">Log in</button>
+        <button type="submit" data-action="register">Register</button>
+      </div>
+      <p id="auth-error" class="error-text"></p>
+    </form>
+  </section>
+
+  <section id="chat-view" class="hidden">
+    <aside>
+      <button id="new-chat">+ New chat</button>
+      <ul id="conversations"></ul>
+    </aside>
+    <main>
+      <div id="log"></div>
+      <form id="chat-form">
+        <input id="input" placeholder="Say something..." autocomplete="off" required>
+        <button id="send">Send</button>
+      </form>
+      <div id="stats"></div>
+    </main>
+  </section>
 
   <script>
+    const TOKEN_KEY = "chat_jpt_token";
+    let token = localStorage.getItem(TOKEN_KEY);
     let conversationId = null;
-    const log = document.getElementById("log");
-    const form = document.getElementById("form");
-    const input = document.getElementById("input");
-    const send = document.getElementById("send");
-    const stats = document.getElementById("stats");
+
+    const $ = (id) => document.getElementById(id);
+
+    // fetch wrapper: adds the token, logs out on 401, turns errors into readable messages
+    async function api(path, options = {}) {
+      const headers = { ...(options.headers || {}) };
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      const res = await fetch(path, { ...options, headers });
+      if (res.status === 401 && token) {
+        logout();
+        throw new Error("Session expired, please log in again");
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        const detail = Array.isArray(err.detail) ? err.detail[0]?.msg : err.detail;
+        throw new Error(detail || `Request failed (${res.status})`);
+      }
+      return res;
+    }
 
     function addMessage(role, text) {
       const div = document.createElement("div");
       div.className = `msg ${role}`;
       div.textContent = text;
-      log.appendChild(div);
+      $("log").appendChild(div);
       return div;
     }
 
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const message = input.value.trim();
-      if (!message) return;
+    function showAuth() {
+      $("auth-view").classList.remove("hidden");
+      $("chat-view").classList.add("hidden");
+      $("userbar").classList.add("hidden");
+    }
 
-      input.value = "";
-      send.disabled = true;
-      addMessage("user", message);
-      const out = addMessage("assistant", "");
+    async function showApp() {
+      const me = await (await api("/auth/me")).json();
+      $("who").textContent = me.username;
+      $("auth-view").classList.add("hidden");
+      $("chat-view").classList.remove("hidden");
+      $("userbar").classList.remove("hidden");
+      newChat();
+      await Promise.all([loadConversations(), refreshStats()]);
+    }
+
+    function logout() {
+      token = null;
+      localStorage.removeItem(TOKEN_KEY);
+      showAuth();
+    }
+
+    function newChat() {
+      conversationId = null;
+      $("log").replaceChildren();
+    }
+
+    async function refreshStats() {
+      const u = await (await api("/usage")).json();
+      $("stats").textContent =
+        `${u.requests} requests · ${u.input_tokens + u.output_tokens} tokens · $${u.cost_usd.toFixed(6)}`;
+    }
+
+    async function loadConversations() {
+      const conversations = await (await api("/conversations")).json();
+      const list = $("conversations");
+      list.replaceChildren();
+      for (const c of conversations) {
+        const li = document.createElement("li");
+        if (c.id === conversationId) li.className = "active";
+
+        const open = document.createElement("button");
+        open.className = "title";
+        open.textContent = c.title;  // textContent, not innerHTML: titles are user input
+        open.onclick = () => openConversation(c.id);
+
+        const del = document.createElement("button");
+        del.className = "delete";
+        del.textContent = "×";
+        del.title = "Delete";
+        del.onclick = () => deleteConversation(c.id);
+
+        li.append(open, del);
+        list.appendChild(li);
+      }
+    }
+
+    async function openConversation(id) {
+      conversationId = id;
+      $("log").replaceChildren();
+      const messages = await (await api(`/conversations/${id}/messages`)).json();
+      for (const m of messages) addMessage(m.role, m.content);
+      await loadConversations();
+    }
+
+    async function deleteConversation(id) {
+      if (!confirm("Delete this conversation?")) return;
+      await api(`/conversations/${id}`, { method: "DELETE" });
+      if (id === conversationId) newChat();
+      await loadConversations();
+    }
+
+    $("auth-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const action = e.submitter.dataset.action;
+      const username = $("username").value.trim();
+      const password = $("password").value;
+      $("auth-error").textContent = "";
 
       try {
-        const res = await fetch("/chat/stream", {
+        if (action === "register") {
+          await api("/auth/register", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username, password }),
+          });
+        }
+        // Login uses form fields (OAuth2 standard), not JSON
+        const res = await api("/auth/login", {
+          method: "POST",
+          body: new URLSearchParams({ username, password }),
+        });
+        token = (await res.json()).access_token;
+        localStorage.setItem(TOKEN_KEY, token);
+        $("password").value = "";
+        await showApp();
+      } catch (err) {
+        $("auth-error").textContent = err.message;
+      }
+    });
+
+    $("logout").addEventListener("click", logout);
+
+    $("new-chat").addEventListener("click", () => {
+      newChat();
+      loadConversations();
+    });
+
+    $("chat-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const message = $("input").value.trim();
+      if (!message) return;
+
+      $("input").value = "";
+      $("send").disabled = true;
+      addMessage("user", message);
+      const out = addMessage("assistant", "");
+      const isNew = conversationId === null;
+
+      try {
+        const res = await api("/chat/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message, conversation_id: conversationId }),
         });
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(typeof err.detail === "string" ? err.detail : JSON.stringify(err.detail));
-        }
         conversationId = res.headers.get("X-Conversation-Id");
 
         const reader = res.body.getReader();
@@ -72,16 +241,19 @@
           out.textContent += decoder.decode(value, { stream: true });
         }
 
-        const u = await (await fetch("/usage")).json();
-        stats.textContent = `${u.requests} requests · ${u.input_tokens + u.output_tokens} tokens · $${u.cost_usd.toFixed(6)}`;
+        await refreshStats();
+        if (isNew) await loadConversations();
       } catch (err) {
         out.className = "msg error";
         out.textContent = `Error: ${err.message}`;
       } finally {
-        send.disabled = false;
-        input.focus();
+        $("send").disabled = false;
+        $("input").focus();
       }
     });
+
+    if (token) showApp().catch(logout);
+    else showAuth();
   </script>
 </body>
 </html>

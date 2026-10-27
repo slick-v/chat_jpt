@@ -13,6 +13,16 @@ class Settings(BaseSettings):
     max_history_messages: int = 20 
     system_prompt: str = "You are a helpful, concise assistant."
 
+    # DB
+    database_path:str = "chat.db"
+    # SecretStr hides the value if settings ever get printed or logged
+    # AUTH
+    jwt_secret_key:SecretStr
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60
+
+
+
 
 
 settings = Settings()
